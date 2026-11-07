@@ -1,0 +1,50 @@
+{
+  "name": "dsh-voice-lab-main",
+  "version": "1.0.0",
+  "description": "DSH Voice Lab public build: connect local TTS models, manage voice presets, train multi-audio voices, and dub replies.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "train.js",
+    "cordis.patch.yml",
+    "python/*.py",
+    "python/*.yaml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "tts",
+    "voice",
+    "voice-clone",
+    "moss-tts",
+    "douyin"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

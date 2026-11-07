@@ -1,0 +1,14 @@
+node_modules/
+.dsh/
+voice-lab-main/
+*.log
+*.zip
+*.wav
+*.mp3
+*.m4a
+*.flac
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/

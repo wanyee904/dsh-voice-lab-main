@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Voice Lab">
+  <defs>
+    <linearGradient id="bg" x1="6" y1="4" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f6bff"/>
+      <stop offset="1" stop-color="#7a4dff"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="12" y1="32" x2="52" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.72"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.72"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="url(#bg)"/>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="none" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+  <g fill="none" stroke="url(#wave)" stroke-width="3.4" stroke-linecap="round">
+    <path d="M11 32h3.5l3.2-9 4.6 19 4.8-25 5.2 31 4.4-22 3.2 12 2.6-6H53"/>
+  </g>
+  <circle cx="51" cy="15" r="4.2" fill="#ffd166"/>
+  <circle cx="51" cy="15" r="7" fill="#ffd166" fill-opacity="0.22"/>
+</svg>

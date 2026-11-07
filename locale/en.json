@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Voice Lab",
+    "description": "Connect local TTS models such as MOSS-TTS-Nano, train reusable voice presets, and dub replies to users and Douyin messages in real time."
+  }
+}

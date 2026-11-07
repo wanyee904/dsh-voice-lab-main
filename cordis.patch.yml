@@ -1,0 +1,6 @@
+# dsh-voice-lab-main bundle patch
+# 插件导出 export const name = 'voice-lab-main'，Loader 的 id 必须与它一致。
+- insert:
+    - id: voice-lab-main
+      name: dsh-voice-lab-main
+      config: {}
