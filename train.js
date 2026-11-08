@@ -71,7 +71,7 @@ const readTail = (file, maxLines = 240) => {
   }
 }
 
-export function createTraining({ root, settingsRef, log, runProcess, audioUrl, defaultScript, previewVoxCPM, onCheckpoint }) {
+export function createTraining({ root, settingsRef, log, runProcess, audioUrl, defaultScript, previewVoxCPM, onCheckpoint, protection }) {
   const trainRoot = join(root, 'train')
   const draftsRoot = join(trainRoot, 'drafts')
   const sessionsRoot = join(trainRoot, 'sessions')
@@ -499,14 +499,24 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
     }
     return list.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
   }
+  const normalizeStaleSession = (meta) => {
+    if (!meta) return meta
+    if (active && active.meta?.id === meta.id) return meta
+    if (!['starting', 'training', 'pausing', 'stopping'].includes(meta.status)) return meta
+    meta.status = 'interrupted'
+    meta.error = meta.error || '训练进程已结束但状态未更新（可能是崩溃或异常退出）'
+    meta.finishedAt = meta.finishedAt || nowIso()
+    saveMeta(meta)
+    return meta
+  }
   const currentMeta = () => {
     if (currentSessionId) {
       const meta = loadMeta(currentSessionId)
-      if (meta) return meta
+      if (meta) return normalizeStaleSession(meta)
     }
     const latest = listMetas()[0]
     currentSessionId = latest?.id || ''
-    return latest || null
+    return normalizeStaleSession(latest || null)
   }
   const sessionSummary = (meta) => ({
     id: meta.id,
@@ -546,6 +556,7 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
   const state = () => {
     const draft = ensureDraft()
     const meta = currentMeta()
+    const sessions = listMetas().map(normalizeStaleSession)
     return {
       models: modelProfiles(),
       backend: {
@@ -558,7 +569,7 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
       draft: draftView(draft),
       currentSessionId: meta?.id || '',
       session: sessionView(meta),
-      sessions: listMetas().map(sessionSummary),
+      sessions: sessions.map(sessionSummary),
       active: Boolean(active),
       targetPresetId: String(trainCfg().targetPresetId || ''),
       defaults: {
@@ -843,6 +854,8 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
       if (active) {
         if (active.watcher) clearInterval(active.watcher)
         if (active.extractor) clearInterval(active.extractor)
+        if (active.protectTimer) clearInterval(active.protectTimer)
+        if (active.protectKill) clearTimeout(active.protectKill)
       }
       active = null
       scanCheckpoints(meta)
@@ -879,6 +892,49 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
       }
     }, clamp(meta.checkpointSec, 30, 3600, 300) * 1000)
     active.extractor.unref?.()
+    if (protection && typeof protection.check === 'function') {
+      active.protectTimer = setInterval(async () => {
+        if (!active || active.meta?.id !== meta.id || active.protectionTriggered || active.protectBusy) return
+        if (!protection.enabled()) return
+        active.protectBusy = true
+        try {
+          const info = await protection.check(false, protection.trainingThresholds?.() || {})
+          if (!info.ok && !info.disabled && !active.protectionTriggered) {
+            active.protectionTriggered = true
+            active.stopRequested = true
+            const message = `智能保护：${info.reasons.join('；')}，已自动停止训练`
+            meta.status = 'stopping'
+            meta.error = message
+            saveMeta(meta)
+            appendLine(meta, `[protect] ${message}`)
+            try {
+              protection.noteEvent?.(message, info.snapshot)
+            } catch {
+              /* ignore */
+            }
+            if (active.protectTimer) clearInterval(active.protectTimer)
+            try {
+              active.child.kill('SIGINT')
+            } catch {
+              /* ignore */
+            }
+            active.protectKill = setTimeout(() => {
+              try {
+                active?.child?.kill()
+              } catch {
+                /* ignore */
+              }
+            }, 10_000)
+            active.protectKill.unref?.()
+          }
+        } catch {
+          /* ignore */
+        } finally {
+          if (active) active.protectBusy = false
+        }
+      }, 2500)
+      active.protectTimer.unref?.()
+    }
     return meta
   }
 
@@ -911,6 +967,15 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
       throw new Error(
         `第 ${mismatch.index} 段是 ${mismatch.sampleRate}Hz，与所选模型要求的 ${model.sampleRate}Hz 不匹配；请重新上传或切换模型`,
       )
+    }
+    if (protection && typeof protection.enabled === 'function' && protection.enabled()) {
+      await protection.release()
+      const info = await protection.check(true, protection.trainingThresholds?.() || {})
+      if (!info.ok) {
+        const message = `训练启动被智能保护拦截：${info.reasons.join('；')}`
+        protection.noteEvent?.(message, info.snapshot)
+        throw new Error(`${message}。请关闭占用内存/显存的程序，或提高可用资源后重试。`)
+      }
     }
     const steps = clamp(payload.steps, 10, 100000, 1000)
     const init = draft.initWeights && draft.initWeights.weights && isFile(draft.initWeights.weights) ? draft.initWeights : null

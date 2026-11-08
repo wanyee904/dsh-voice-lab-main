@@ -2192,12 +2192,32 @@ window.__ModuleLoader__.load({
         if (!id) return
         post('train.presetSettings', { presetId: id, settings: patch }).catch(() => {})
       }
+      const toggleProtection = async (next) => {
+        if (!next && !window.confirm('关闭智能保护后，训练内存/显存溢出时不会自动停机，可能导致系统卡死或崩溃。确定关闭？')) return
+        setError('')
+        setNotice('')
+        setBusyLocal('更新智能保护…')
+        try {
+          await post('train.protection', { enabled: next })
+          setNotice(next ? '智能保护已开启：训练前和训练中会检测内存/显存，低于保护线自动停止。' : '智能保护已关闭：内存/显存溢出时不会自动停机，请自行注意风险。')
+          await refresh(true)
+        } catch (e) {
+          setError(String(e?.message || e))
+        } finally {
+          setBusyLocal('')
+        }
+      }
 
       const session = train.session || null
       const sessions = train.sessions || []
       const targetPreset = train.targetPreset || null
       const currentPresetId = data?.settings?.ui?.selectedPresetId || data?.activePresetId || ''
       const currentPreset = (data?.presets || []).find((p) => p.id === currentPresetId) || null
+      const protectionInfo = train.protection || {}
+      const protectionEnabled = protectionInfo.enabled !== false
+      const protectionSnapshot = protectionInfo.snapshot || null
+      const protectionRam = protectionSnapshot?.ram || null
+      const protectionVram = protectionSnapshot?.vram || null
       const activeStatus = session?.status || ''
       const isRunning = ['starting', 'training', 'pausing', 'stopping'].includes(activeStatus)
       const canResume = ['paused', 'interrupted', 'failed'].includes(activeStatus)
@@ -2830,6 +2850,52 @@ window.__ModuleLoader__.load({
               h(Btn, { size: 'sm', icon: 'lock', onClick: unbindTarget, disabled: !!busyLocal || isRunning }, t('train.target.unbind', '解除锁定')),
             )
           : null,
+        h(
+          'section',
+          { className: 'vl-card vl-protect-card' },
+          h(
+            'div',
+            { className: 'vl-card-head' },
+            h('span', { className: 'vl-card-title' }, t('train.protection', '智能保护')),
+            h(
+              'span',
+              { className: 'vl-chip', 'data-tone': protectionEnabled ? 'ok' : 'warn' },
+              protectionEnabled ? t('train.protection.on', '保护已开启') : t('train.protection.off', '保护已关闭'),
+            ),
+          ),
+          h(Switch, {
+            on: protectionEnabled,
+            onChange: toggleProtection,
+            disabled: !!busyLocal,
+            label: t('train.protection.toggle', '内存 / 显存防崩溃'),
+            desc: t('train.protection.desc', '训练前释放常驻模型，训练中每 2.5 秒检测；低于保护线自动停止，避免系统卡死。'),
+          }),
+          h(
+            'div',
+            { className: 'vl-protect-stats' },
+            h('span', null, `内存：${protectionRam ? `${protectionRam.freeMb} / ${protectionRam.totalMb} MB 可用` : '检测中…'}`),
+            h(
+              'span',
+              null,
+              `显存：${protectionVram ? (protectionVram.available ? `${protectionVram.freeMb} / ${protectionVram.totalMb} MB 可用` : '未检测到 NVIDIA') : '检测中…'}`,
+            ),
+            h(
+              'span',
+              { className: 'vl-muted' },
+              `保护线：内存 ≥ ${protectionInfo.thresholds?.ramFreeMb ?? 1500} MB / 显存 ≥ ${protectionInfo.thresholds?.vramFreeMb ?? 1500} MB；训练启动要求更高（≥4000 / ≥2500 MB）`,
+            ),
+          ),
+          !protectionEnabled
+            ? h(
+                'div',
+                { className: 'vl-protect-warning' },
+                '智能保护已关闭：内存/显存溢出时不会自动停机，可能导致系统卡死或崩溃。',
+              )
+            : null,
+          protectionInfo.lastEvent?.message
+            ? h('div', { className: 'vl-protect-last' }, `最近触发：${protectionInfo.lastEvent.message}`)
+            : null,
+        ),
         h(
           'section',
           { className: 'vl-card' },
@@ -3812,6 +3878,9 @@ window.__ModuleLoader__.load({
       .vl-train-export{margin-top:14px;padding-top:12px;border-top:1px dashed var(--dsw-alias-border-l1)}
       .vl-train-export-result{margin-top:10px;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:11px;line-height:1.6;word-break:break-all}
       .vl-train-init{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 5%,var(--dsw-alias-bg-layer-2));font-size:11px;line-height:1.5}
+      .vl-protect-stats{display:flex;flex-wrap:wrap;gap:6px 16px;margin:8px 0 0;font-size:11px;line-height:1.5}
+      .vl-protect-warning{margin-top:8px;padding:8px 10px;border:1px solid color-mix(in srgb,var(--dsw-alias-text-warn,orange) 40%,var(--dsw-alias-border-l1));border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-text-warn,orange) 8%,var(--dsw-alias-bg-layer-2));font-size:11px;line-height:1.6}
+      .vl-protect-last{margin-top:6px;font-size:11px;line-height:1.5;color:var(--dsw-alias-text-l2)}
       .vl-train-weights-form{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
       .vl-weights-warn{font-size:11px;line-height:1.6;color:var(--dsw-alias-text-warn,var(--dsw-alias-text-l2))}
       .vl-weights-label{font-size:11px;font-weight:600;color:var(--dsw-alias-text-l1)}

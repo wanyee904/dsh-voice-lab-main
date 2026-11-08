@@ -31,6 +31,7 @@ import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createTraining } from './train.js'
+import { createProtection } from './protection.js'
 
 export const name = 'voice-lab-main'
 export const inject = ['tools', 'webServer']
@@ -129,6 +130,9 @@ const DEFAULT_SETTINGS = {
     logRetentionDays: 7,
     targetPresetId: '',
     byPreset: {},
+    smartProtection: true,
+    protectRamFreeMb: 1500,
+    protectVramFreeMb: 1500,
   },
   ui: {
     tab: 'studio',
@@ -1318,6 +1322,20 @@ export function apply(ctx, config = {}) {
 
   const moss = new MossRunner(() => settings)
   const voxcpm = new VoxCPMRunner(() => settings)
+  const protection = createProtection({
+    settingsRef: () => settings,
+    log,
+    releaseResidents: async () => {
+      if (moss.snapshot().state !== 'stopped') await moss.stop().catch(() => {})
+      if (voxcpm.snapshot().state !== 'stopped') await voxcpm.stop().catch(() => {})
+    },
+  })
+  const protectionView = () => ({
+    enabled: protection.enabled(),
+    thresholds: protection.thresholds(),
+    snapshot: protection.snapshot(),
+    lastEvent: protection.lastEvent(),
+  })
 
   const applyResidentModel = async () => {
     try {
@@ -1457,6 +1475,7 @@ export function apply(ctx, config = {}) {
     audioUrl,
     defaultScript: TRAIN_SCRIPT_PATH,
     onCheckpoint: ({ meta, checkpoint }) => scheduleTargetCheckpoint(meta, checkpoint),
+    protection,
     previewVoxCPM: async ({ weightsDir, text, out }) => {
       const previewRunner = new VoxCPMRunner(() => ({
         voxcpm: { ...settings.voxcpm, weightsDir, cfgValue: 2, steps: 20, seed: 1234 },
@@ -1885,6 +1904,14 @@ export function apply(ctx, config = {}) {
       log(`命令前停止 VoxCPM 失败：${String(e?.message || e)}`)
     }
     if (released.length) log(`执行命令前已释放显存，停止常驻：${released.join('/')}`)
+    if (protection.enabled()) {
+      const info = await protection.check(true)
+      if (!info.ok) {
+        throw new Error(
+          `智能保护：${info.reasons.join('；')}；已阻止启动命令，避免内存/显存耗尽。请关闭占用资源的程序，或在训练页关闭智能保护后再试。`,
+        )
+      }
+    }
     const res = await runCommand(command, cfg.cwd || '', clamp(cfg.timeoutSec, 10, 1800, 180) * 1000)
     if (!res.ok) {
       if (res.code === 3221225477 || res.code === -1073741819) {
@@ -2303,6 +2330,7 @@ export function apply(ctx, config = {}) {
       train: {
         ...trainState,
         perPreset: settings.train?.byPreset || {},
+        protection: protectionView(),
         targetPreset: targetPreset
           ? { id: targetPreset.id, name: targetPreset.name, locked: targetPreset.locked === true, engine: targetPreset.engine }
           : null,
@@ -2719,6 +2747,14 @@ export function apply(ctx, config = {}) {
     if (action === 'train.bindPreset') return bindTrainingPreset(payload)
     if (action === 'train.unbindPreset') return unbindTrainingPreset()
     if (action === 'train.presetSettings') return savePresetTrainSettings(payload)
+    if (action === 'train.protection') {
+      settings.train = settings.train || {}
+      settings.train.smartProtection = payload.enabled !== false
+      saveSettings()
+      protection.sync()
+      if (settings.train.smartProtection) await protection.check(true)
+      return { ok: true, protection: protectionView() }
+    }
     if (action === 'preset.loadWeights') return loadWeightsToPreset(payload)
     if (action === 'train.createPreset') return createPresetFromCheckpoint(payload)
     if (action === 'train.importPreset') return importPresetToDraft(payload)
