@@ -70,6 +70,7 @@ const DOUYIN_TOOLS = {
 
 const DEFAULT_SETTINGS = {
   engine: 'moss',
+  voiceEnabled: true,
   activePresetId: 'moss:Junhao',
   hiddenBuiltinVoices: [],
   moss: {
@@ -127,6 +128,7 @@ const DEFAULT_SETTINGS = {
     exportDir: '',
     logRetentionDays: 7,
     targetPresetId: '',
+    byPreset: {},
   },
   ui: {
     tab: 'studio',
@@ -1865,13 +1867,39 @@ export function apply(ctx, config = {}) {
     }
     const command = template.replace(/\{(\w+)\}/g, (m, key) => (key in vars ? String(vars[key]) : m))
     log(`执行自定义语音命令：${command.slice(0, 240)}`)
+    const released = []
+    try {
+      if (moss.snapshot().state !== 'stopped') {
+        await moss.stop()
+        released.push('MOSS')
+      }
+    } catch (e) {
+      log(`命令前停止 MOSS 失败：${String(e?.message || e)}`)
+    }
+    try {
+      if (voxcpm.snapshot().state !== 'stopped') {
+        await voxcpm.stop()
+        released.push('VoxCPM')
+      }
+    } catch (e) {
+      log(`命令前停止 VoxCPM 失败：${String(e?.message || e)}`)
+    }
+    if (released.length) log(`执行命令前已释放显存，停止常驻：${released.join('/')}`)
     const res = await runCommand(command, cfg.cwd || '', clamp(cfg.timeoutSec, 10, 1800, 180) * 1000)
-    if (!res.ok) throw new Error(`命令失败（code=${res.code}）：${(res.err || res.out || '').slice(-500)}`)
+    if (!res.ok) {
+      if (res.code === 3221225477 || res.code === -1073741819) {
+        throw new Error(
+          '命令进程崩溃（0xC0000005）：通常是显存不足或 CUDA 驱动冲突。已自动停止常驻模型；请确认没有其他程序占用显存，或改用 VoxCPM 常驻并把全局权重设为该声音后重试。',
+        )
+      }
+      throw new Error(`命令失败（code=${res.code}）：${(res.err || res.out || '').slice(-500)}`)
+    }
     if (!isFile(outFile)) throw new Error('命令执行完成，但没有生成输出音频文件（检查 {out} 占位符）')
     return { seconds: wavDuration(readFileSync(outFile)), commandLog: (res.out || '').slice(-400) }
   }
 
   const synthesize = async ({ text, presetId, source = 'manual', meta = {}, savePreview = false, engineOverride = '' }) => {
+    if (settings.voiceEnabled === false) throw new Error('当前声线已停止使用：请在 Studio 点「恢复使用」或选择一条声线')
     const preset = resolvePreset(presetId)
     if (!preset) throw new Error('找不到声线预设')
     const sentence = cleanText(text, 4000)
@@ -2274,6 +2302,7 @@ export function apply(ctx, config = {}) {
       voxcpm: voxcpm.snapshot(),
       train: {
         ...trainState,
+        perPreset: settings.train?.byPreset || {},
         targetPreset: targetPreset
           ? { id: targetPreset.id, name: targetPreset.name, locked: targetPreset.locked === true, engine: targetPreset.engine }
           : null,
@@ -2479,6 +2508,80 @@ export function apply(ctx, config = {}) {
     targetApplyTimer.unref?.()
   }
 
+  const savePresetTrainSettings = (payload = {}) => {
+    const presetId = String(payload.presetId || '')
+    if (!presetId) throw new Error('缺少预设 id')
+    const patch = payload.settings && typeof payload.settings === 'object' ? payload.settings : {}
+    const allowed = ['steps', 'loraR', 'checkpointSteps', 'checkpointSec', 'pathMode', 'exportDir', 'model']
+    const clean = {}
+    for (const key of allowed) {
+      if (patch[key] !== undefined) clean[key] = patch[key]
+    }
+    settings.train = settings.train || {}
+    settings.train.byPreset = settings.train.byPreset || {}
+    settings.train.byPreset[presetId] = { ...(settings.train.byPreset[presetId] || {}), ...clean }
+    saveSettings()
+    return { ok: true, presetId, settings: settings.train.byPreset[presetId] }
+  }
+
+  const loadWeightsToPreset = async (payload = {}) => {
+    const preset = loadPreset(String(payload.presetId || settings.ui?.selectedPresetId || settings.activePresetId || ''))
+    if (!preset) throw new Error('找不到当前预设声线')
+    if (preset.kind === 'builtin') throw new Error('内置音色不能载入权重')
+    if (preset.locked === true) throw new Error('只读声线不能载入权重')
+    assertNotTrainTarget(preset, '载入权重')
+    const resolved = training.resolveWeights(payload.path || payload.weightsPath || '')
+    const python = String(settings.voxcpm?.pythonPath || '').trim()
+    const base = String(settings.voxcpm?.baseModel || preset.baseModel || '').trim()
+    if (!python || !base) throw new Error('先在「引擎」里配置 VoxCPM Python 和底座目录')
+    const dir = ensureDir(userPresetDir(preset.id))
+    let refFile = preset.reference?.file ? join(dir, preset.reference.file) : ''
+    if (!refFile || !isFile(refFile)) {
+      const clip = (preset.clips || []).find((c) => !c.removed && c.normalizedFile && isFile(c.normalizedFile)) ||
+        (preset.clips || []).find((c) => !c.removed && c.file && isFile(c.file))
+      if (clip) {
+        copyFileSync(clip.normalizedFile || clip.file, join(dir, 'ref.wav'))
+        refFile = join(dir, 'ref.wav')
+        preset.reference = { ...(preset.reference || {}), file: 'ref.wav', builtAt: preset.reference?.builtAt || nowIso() }
+      }
+    }
+    if (!refFile || !isFile(refFile)) throw new Error('当前声线没有参考音；请先提交训练素材，或选择已有参考音的预设')
+    if (basename(refFile) !== 'ref.wav') {
+      copyFileSync(refFile, join(dir, 'ref.wav'))
+      refFile = join(dir, 'ref.wav')
+      preset.reference = { ...(preset.reference || {}), file: 'ref.wav', builtAt: preset.reference?.builtAt || nowIso() }
+    }
+    const refTxt = join(dir, 'ref.txt')
+    if (!isFile(refTxt)) {
+      const text = (preset.clips || []).find((c) => String(c.text || '').trim())?.text || ''
+      writeFileSync(refTxt, String(text).trim(), 'utf8')
+    }
+    if (!isFile(refTxt)) throw new Error('当前声线缺少参考音台词 ref.txt')
+    copyFileSync(resolved.weights, join(dir, resolved.file))
+    if (resolved.config) copyFileSync(resolved.config, join(dir, 'lora_config.json'))
+    const scriptPath = join(dir, 'speak.py')
+    writeFileSync(scriptPath, buildSpeakScript(base), 'utf8')
+    preset.kind = 'remote'
+    preset.engine = 'command'
+    preset.status = 'ready'
+    preset.command = {
+      template: `"${python}" "${scriptPath}" --text-file {textFile} --out {out}`,
+      cwd: dir,
+      timeoutSec: 600,
+    }
+    preset.loadedWeights = {
+      name: resolved.name,
+      r: resolved.r || null,
+      source: resolved.source,
+      at: nowIso(),
+    }
+    preset.note = `已载入训练权重：${resolved.name}${resolved.r ? `（r=${resolved.r}）` : ''}`
+    preset.updatedAt = nowIso()
+    savePreset(preset)
+    log(`权重已载入当前声线：${preset.name} ← ${resolved.name}`)
+    return { ok: true, preset: presetView(preset), loaded: preset.loadedWeights }
+  }
+
   const bindTrainingPreset = async (payload = {}) => {
     const preset = loadPreset(String(payload.presetId || ''))
     if (!preset) throw new Error('预设不存在')
@@ -2615,6 +2718,8 @@ export function apply(ctx, config = {}) {
     const action = String(payload?.action || '')
     if (action === 'train.bindPreset') return bindTrainingPreset(payload)
     if (action === 'train.unbindPreset') return unbindTrainingPreset()
+    if (action === 'train.presetSettings') return savePresetTrainSettings(payload)
+    if (action === 'preset.loadWeights') return loadWeightsToPreset(payload)
     if (action === 'train.createPreset') return createPresetFromCheckpoint(payload)
     if (action === 'train.importPreset') return importPresetToDraft(payload)
     if (action.startsWith('train.')) return training.handleAction(action, payload)
@@ -2752,8 +2857,17 @@ export function apply(ctx, config = {}) {
           settings.hiddenBuiltinVoices = (settings.hiddenBuiltinVoices || []).filter((v) => v !== preset.builtinVoice)
         }
         settings.activePresetId = preset.id
+        settings.voiceEnabled = true
         saveSettings()
         return { ok: true, activePresetId: preset.id, hiddenBuiltinCount: (settings.hiddenBuiltinVoices || []).length }
+      }
+      case 'preset.stopUsing': {
+        const preset = loadPreset(String(settings.activePresetId || ''))
+        if (!preset) throw new Error('当前没有可停止的声线')
+        settings.voiceEnabled = false
+        saveSettings()
+        log(`停止使用声线：${preset.name}`)
+        return { ok: true, voiceEnabled: false, preset: presetView(preset) }
       }
       case 'preset.undo':
       case 'preset.redo': {

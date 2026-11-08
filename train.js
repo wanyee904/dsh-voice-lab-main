@@ -199,7 +199,165 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
     model: draft.model || 'voxcpm',
     sampleRate: draft.sampleRate || 16000,
     items: draft.items.map(itemView),
+    initWeights: draft.initWeights
+      ? {
+          id: draft.initWeights.id,
+          name: draft.initWeights.name,
+          r: draft.initWeights.r || null,
+          size: draft.initWeights.size || 0,
+          importedAt: draft.initWeights.importedAt || '',
+        }
+      : null,
   })
+
+  const clearDraftData = (draft) => {
+    const dir = draftDir(draft.id)
+    for (const item of draft.items || []) {
+      for (const file of [item.original, item.path]) {
+        try {
+          if (file && isFile(file)) rmSync(file, { force: true })
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    try {
+      rmSync(join(dir, 'audio'), { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+    ensureDir(join(dir, 'audio'))
+    for (const name of ['dataset.jsonl', 'train.jsonl', 'data.jsonl', 'jsonl.txt']) {
+      try {
+        rmSync(join(dir, name), { force: true })
+      } catch {
+        /* ignore */
+      }
+    }
+    draft.items = []
+    return draft
+  }
+
+  const resolveWeightsSource = (input) => {
+    const raw = String(input || '').trim().replace(/^["']|["']$/g, '')
+    if (!raw) throw new Error('请填写训练权重目录或 lora_weights.safetensors 路径')
+    const source = resolve(raw)
+    if (!isFile(source) && !isDir(source)) throw new Error(`权重路径不存在：${source}`)
+    if (isFile(source) && !/\.(safetensors|ckpt)$/i.test(source)) {
+      throw new Error('请选择 lora_weights.safetensors / .ckpt 文件，或包含两个权重文件的目录；ZIP 请先解压')
+    }
+    const candidates = []
+    if (isFile(source)) {
+      candidates.push(source)
+    } else {
+      for (const base of [source, join(source, 'latest'), join(source, 'save', 'latest'), join(source, 'weights')]) {
+        candidates.push(join(base, 'lora_weights.safetensors'), join(base, 'lora_weights.ckpt'))
+      }
+      for (const base of [source, join(source, 'save')]) {
+        try {
+          const steps = readdirSync(base)
+            .filter((name) => /^step_\d+$/.test(name))
+            .sort((a, b) => Number(b.slice(5)) - Number(a.slice(5)))
+          for (const step of steps) {
+            candidates.push(join(base, step, 'lora_weights.safetensors'), join(base, step, 'lora_weights.ckpt'))
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        const versions = readdirSync(source, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+          .sort()
+          .reverse()
+        for (const version of versions) {
+          candidates.push(
+            join(source, version, 'lora_weights.safetensors'),
+            join(source, version, 'lora_weights.ckpt'),
+          )
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    const weights = candidates.find((file) => isFile(file))
+    if (!weights) throw new Error('没有找到 lora_weights.safetensors；请选择包含该文件的目录或直接选文件')
+    const weightDir = dirname(weights)
+    const configCandidates = [join(weightDir, 'lora_config.json')]
+    if (isDir(source)) configCandidates.push(join(source, 'lora_config.json'))
+    const config = configCandidates.find((file) => isFile(file)) || ''
+    let r = 0
+    if (config) {
+      const parsed = readJson(config, null)
+      r = Number(parsed?.lora_config?.r ?? parsed?.r ?? 0) || 0
+    }
+    return {
+      source,
+      weights,
+      config,
+      r: r >= 4 && r <= 128 ? r : 0,
+      file: /\.ckpt$/i.test(weights) ? 'lora_weights.ckpt' : 'lora_weights.safetensors',
+      name: basename(isDir(source) ? source : weightDir),
+      size: statSync(weights).size || 0,
+    }
+  }
+
+  const importWeights = async (payload = {}) => {
+    if (active) throw new Error('当前有训练在运行；请先暂停或停止再导入权重')
+    const resolved = resolveWeightsSource(payload.path)
+    const draft = loadDraft(payload.draftId) || ensureDraft()
+    const initsRoot = ensureDir(join(trainRoot, 'inits'))
+    const initId = `init-${Date.now()}-${randomUUID().slice(0, 6)}`
+    const initDir = ensureDir(join(initsRoot, initId))
+    copyFileSync(resolved.weights, join(initDir, resolved.file))
+    if (resolved.config) copyFileSync(resolved.config, join(initDir, 'lora_config.json'))
+    const old = draft.initWeights
+    const init = {
+      id: initId,
+      name: resolved.name,
+      source: resolved.source,
+      weights: join(initDir, resolved.file),
+      config: resolved.config ? join(initDir, 'lora_config.json') : '',
+      file: resolved.file,
+      r: resolved.r || null,
+      size: resolved.size,
+      importedAt: nowIso(),
+    }
+    clearDraftData(draft)
+    draft.initWeights = init
+    saveDraft(draft)
+    if (old?.id && old.id !== initId) {
+      try {
+        rmSync(join(initsRoot, old.id), { recursive: true, force: true })
+      } catch {
+        /* ignore */
+      }
+    }
+    log(`已导入训练权重：${init.name}（r=${init.r || '未知'}），并清空当前写入端口音频/台词`)
+    return {
+      ok: true,
+      draft: draftView(draft),
+      initWeights: draftView(draft).initWeights,
+      loraR: init.r,
+    }
+  }
+
+  const clearImportedWeights = async (payload = {}) => {
+    if (active) throw new Error('当前有训练在运行；请先暂停或停止再清除权重')
+    const draft = loadDraft(payload.draftId) || ensureDraft()
+    const old = draft.initWeights
+    draft.initWeights = null
+    saveDraft(draft)
+    if (old?.id) {
+      try {
+        rmSync(join(trainRoot, 'inits', old.id), { recursive: true, force: true })
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: true, draft: draftView(draft) }
+  }
 
   // ── FFmpeg / 音频适配 ──
   const findFfmpeg = async () => {
@@ -755,7 +913,10 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
       )
     }
     const steps = clamp(payload.steps, 10, 100000, 1000)
-    const loraR = clamp(payload.loraR, 4, 128, 32)
+    const init = draft.initWeights && draft.initWeights.weights && isFile(draft.initWeights.weights) ? draft.initWeights : null
+    if (draft.initWeights && !init) throw new Error('导入的训练权重文件不存在，请重新点击「使用权重训练」导入')
+    const initR = Number(init?.r || 0)
+    const loraR = clamp(initR >= 4 ? initR : payload.loraR, 4, 128, 32)
     const checkpointSteps = clamp(payload.checkpointSteps, 10, steps, 100)
     const checkpointSec = clamp(payload.checkpointSec, 30, 3600, 300)
     const id = `t-${Date.now()}-${randomUUID().slice(0, 6)}`
@@ -774,6 +935,9 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
       checkpointSec,
       pathMode,
       targetPresetId: String(settings().train?.targetPresetId || payload.targetPresetId || ''),
+      initWeights: init
+        ? { name: init.name, r: init.r || null, source: init.source, importedAt: init.importedAt }
+        : null,
       status: 'starting',
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -800,6 +964,18 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
     writeDataset(meta)
     writeConfig(meta)
     saveMeta(meta)
+    if (init) {
+      const latest = ensureDir(join(meta.saveDir, 'latest'))
+      copyFileSync(init.weights, join(latest, init.file || 'lora_weights.safetensors'))
+      if (init.config && isFile(init.config)) copyFileSync(init.config, join(latest, 'lora_config.json'))
+      draft.initWeights = null
+      saveDraft(draft)
+      try {
+        rmSync(join(trainRoot, 'inits', init.id), { recursive: true, force: true })
+      } catch {
+        /* ignore */
+      }
+    }
     currentSessionId = id
     writeFileSync(meta.runLog, '', 'utf8')
     spawnTrainer(meta)
@@ -1008,6 +1184,41 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
     }
   }
 
+  const deleteLogs = async (payload = {}) => {
+    const meta = loadMeta(payload.sessionId) || currentMeta()
+    if (!meta) throw new Error('找不到训练会话')
+    try {
+      if (meta.runLog && isFile(meta.runLog)) rmSync(meta.runLog, { force: true })
+      if (meta.saveDir && isFile(join(meta.saveDir, 'train.log'))) rmSync(join(meta.saveDir, 'train.log'), { force: true })
+      if (meta.sessionDir && isDir(join(meta.sessionDir, 'logs'))) rmSync(join(meta.sessionDir, 'logs'), { recursive: true, force: true })
+      meta.logsDeletedAt = nowIso()
+      saveMeta(meta)
+    } catch (e) {
+      throw new Error(`删除日志失败：${String(e?.message || e)}`)
+    }
+    return { ok: true, session: sessionView(meta) }
+  }
+
+  const openLog = async (payload = {}) => {
+    const meta = loadMeta(payload.sessionId) || currentMeta()
+    if (!meta) throw new Error('找不到训练会话')
+    const file = meta.runLog && isFile(meta.runLog)
+      ? meta.runLog
+      : meta.saveDir && isFile(join(meta.saveDir, 'train.log'))
+        ? join(meta.saveDir, 'train.log')
+        : ''
+    if (!file) throw new Error('日志文件不存在或已删除')
+    if (process.platform === 'win32') {
+      const escaped = file.replace(/'/g, "''")
+      await runProcess('powershell.exe', ['-NoProfile', '-Command', `Start-Process -FilePath '${escaped}'`], dirname(file), 20_000)
+    } else if (process.platform === 'darwin') {
+      await runProcess('open', [file], dirname(file), 20_000)
+    } else {
+      await runProcess('xdg-open', [file], dirname(file), 20_000)
+    }
+    return { ok: true, path: file }
+  }
+
   const cleanupLogs = () => {
     const days = clamp(trainCfg().logRetentionDays, 1, 365, 7)
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
@@ -1150,6 +1361,10 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
           }),
         }
       }
+      case 'train.importWeights':
+        return importWeights(payload)
+      case 'train.weights.clear':
+        return clearImportedWeights(payload)
       case 'train.start':
         return startSession(payload)
       case 'train.pause':
@@ -1170,6 +1385,10 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
         return previewCheckpoint(payload)
       case 'train.export':
         return exportPackage(payload)
+      case 'train.log.delete':
+        return deleteLogs(payload)
+      case 'train.log.open':
+        return openLog(payload)
       case 'train.logs.cleanup':
         cleanupLogs()
         return { ok: true, train: state() }
@@ -1266,5 +1485,6 @@ export function createTraining({ root, settingsRef, log, runProcess, audioUrl, d
     getDraft: (id) => loadDraft(id),
     importPreset,
     createDraft,
+    resolveWeights: (path) => resolveWeightsSource(path),
   }
 }

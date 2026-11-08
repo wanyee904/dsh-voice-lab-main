@@ -93,10 +93,10 @@ window.__ModuleLoader__.load({
       'textReader.read': '朗读文本',
       'reader.model': '语音模型',
       'reader.auto': '跟随预设（{engine}）',
-      'reader.voxcpm': 'VoxCPM 常驻（当前权重）',
+      'reader.voxcpm': 'VoxCPM 常驻（全局权重）',
       'reader.moss': 'MOSS-TTS-Nano（会换声线）',
       'reader.auto.hint': '使用预设原来的引擎，质量不变。',
-      'reader.voxcpm.hint': '本地 VoxCPM 常驻，使用当前 VoxCPM 权重；其他预设选它会换成 VoxCPM 的声线。',
+      'reader.voxcpm.hint': '本地 VoxCPM 常驻，使用引擎设置里的全局 VoxCPM 权重，不是当前预设载入的权重；要听当前预设自己的权重请选「跟随预设」。',
       'reader.moss.hint': 'MOSS 引擎；若预设没有 MOSS 参考音，会改用内置音色，声线会变。',
       'speak': '朗读台词',
       'speaking': '正在合成…',
@@ -268,10 +268,10 @@ window.__ModuleLoader__.load({
       'textReader.read': 'Read text',
       'reader.model': 'Voice model',
       'reader.auto': 'Follow preset ({engine})',
-      'reader.voxcpm': 'VoxCPM resident (current weights)',
+      'reader.voxcpm': 'VoxCPM resident (global weights)',
       'reader.moss': 'MOSS-TTS-Nano (changes voice)',
       'reader.auto.hint': 'Use the preset’s original engine; quality unchanged.',
-      'reader.voxcpm.hint': 'Local VoxCPM resident using the current VoxCPM weights. Other presets will switch to the VoxCPM voice.',
+      'reader.voxcpm.hint': 'Local VoxCPM resident using the global VoxCPM weights from engine settings, not the weights loaded into this preset; choose Follow preset to hear this preset’s own weights.',
       'reader.moss.hint': 'MOSS engine; if the preset has no MOSS reference it falls back to a built-in voice, so the voice changes.',
       'speak': 'Read line',
       'speaking': 'Synthesizing…',
@@ -419,6 +419,8 @@ window.__ModuleLoader__.load({
       close: ['M6 6l12 12', 'M18 6 6 18'],
       lock: ['M7 10V7a5 5 0 0 1 10 0v3', 'M5 10h14v10H5z'],
       pause: ['M8 5v14', 'M16 5v14'],
+      stop: ['M6 6h12v12H6z'],
+      open: ['M14 3h7v7', 'M10 14L21 3', 'M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5'],
       download: ['M12 4v11', 'M7 10l5 5 5-5', 'M5 20h14'],
       upload: ['M12 20V8', 'M7 13l5-5 5 5', 'M5 4h14'],
     }
@@ -669,6 +671,7 @@ window.__ModuleLoader__.load({
       })
       const fileRef = useRef(null)
       const audioRef = useRef(null)
+      const previewAudioRef = useRef(null)
       const pollRef = useRef(null)
       const busyRef = useRef(false)
       const lastOutboxRef = useRef('')
@@ -755,7 +758,7 @@ window.__ModuleLoader__.load({
         setSpeakError('')
         setTrainingWarning('')
         const ui = uiSettingsRef.current || {}
-        const saved = ui.readEngineByPreset?.[selectedId] || ui.readEngine || 'auto'
+        const saved = ui.readEngineByPreset?.[selectedId] || 'auto'
         setReadEngine(['auto', 'voxcpm', 'moss', 'openai', 'httpjson', 'command'].includes(saved) ? saved : 'auto')
       }, [selectedId])
 
@@ -773,14 +776,22 @@ window.__ModuleLoader__.load({
         lastOutboxRef.current = newest.id
         if (!localAutoPlay) return
         if (Date.now() - new Date(newest.at).getTime() > 120_000) return
-        playUrl(newest.url)
+        playUrl(newest.url, false)
       }, [data?.outbox, localAutoPlay])
 
-      const playUrl = useCallback((url) => {
+      const playUrl = useCallback((url, manual = true) => {
         if (!url) return
         try {
+          const absolute = new URL(url, window.location.href).href
           if (!audioRef.current) audioRef.current = new Audio()
           const audio = audioRef.current
+          if (!manual && !audio.paused && !audio.ended) return
+          if (audio.src === absolute && !audio.paused && !audio.ended) return
+          try {
+            previewAudioRef.current?.pause()
+          } catch {
+            /* ignore */
+          }
           audio.pause()
           audio.src = url
           audio.currentTime = 0
@@ -806,6 +817,10 @@ window.__ModuleLoader__.load({
       const stopAudio = useCallback(() => {
         try {
           audioRef.current?.pause()
+          if (previewAudioRef.current) {
+            previewAudioRef.current.pause()
+            previewAudioRef.current.currentTime = 0
+          }
         } catch {
           /* ignore */
         }
@@ -845,6 +860,7 @@ window.__ModuleLoader__.load({
       const builtinPresets = presets.filter((p) => p.kind === 'builtin')
       const selected = presets.find((p) => p.id === selectedId) || null
       const activeId = data?.activePresetId || ''
+      const voiceEnabled = data?.settings?.voiceEnabled !== false
       const engine = data?.engine || { state: 'stopped', detail: '' }
 
       const selectPreset = (id) => {
@@ -865,6 +881,14 @@ window.__ModuleLoader__.load({
         }
         saveUi({ readEngine: value, readEngineByPreset: { [selectedId]: value } }, true)
       }
+      const resetReaderEngine = (presetId) => {
+        if (!presetId) return
+        const ui = uiSettingsRef.current || {}
+        const map = { ...(ui.readEngineByPreset || {}), [presetId]: 'auto' }
+        uiSettingsRef.current = { ...ui, readEngine: 'auto', readEngineByPreset: map }
+        if (selectedId === presetId) setReadEngine('auto')
+        saveUi({ readEngine: 'auto', readEngineByPreset: map }, true)
+      }
       const changeLine = (value) => {
         setLine(value)
         saveUi({ line: value })
@@ -872,6 +896,19 @@ window.__ModuleLoader__.load({
 
       const activatePreset = () =>
         run('选择预设', () => post('preset.select', { presetId: selected.id }), t('toast.selected', '已设为当前声线'))
+
+      const stopUsingVoice = () =>
+        run(
+          '停止使用',
+          async () => {
+            stopAudio()
+            return post('preset.stopUsing')
+          },
+          t('toast.stoppedUsing', '已停止使用当前声线'),
+        )
+
+      const resumeUsingVoice = () =>
+        run('恢复使用', () => post('preset.select', { presetId: selected.id }), t('toast.resumedUsing', '已恢复使用当前声线'))
 
       const usePresetForTraining = () =>
         run(
@@ -1090,7 +1127,7 @@ window.__ModuleLoader__.load({
           readEngine === 'voxcpm'
             ? t(
                 'reader.voxcpm.hint',
-                '本地 VoxCPM 常驻，使用当前 VoxCPM 权重；其他预设选它会换成 VoxCPM 的声线。',
+                '本地 VoxCPM 常驻，使用引擎设置里的全局 VoxCPM 权重，不是当前预设载入的权重；要听当前预设自己的权重请选「跟随预设」。',
               )
             : readEngine === 'moss'
               ? t('reader.moss.hint', 'MOSS 引擎；若预设没有 MOSS 参考音，会改用内置音色，声线会变。')
@@ -1122,7 +1159,7 @@ window.__ModuleLoader__.load({
                 { value: 'auto' },
                 t('reader.auto', '跟随预设（{engine}）', { engine: engineLabel(ctx, selected?.engine) }),
               ),
-              h('option', { value: 'voxcpm' }, t('reader.voxcpm', 'VoxCPM 常驻（当前权重）')),
+              h('option', { value: 'voxcpm' }, t('reader.voxcpm', 'VoxCPM 常驻（全局权重）')),
               h('option', { value: 'moss' }, t('reader.moss', 'MOSS-TTS-Nano（会换声线）')),
             ),
             h('span', { className: 'vl-muted vl-reader-hint' }, readerModelHint),
@@ -1158,16 +1195,24 @@ window.__ModuleLoader__.load({
             { className: 'vl-toolbar' },
             h(
               Btn,
-              { kind: 'primary', icon: 'mic', onClick: speakLine, disabled: !!busy },
+              { kind: 'primary', icon: 'mic', onClick: speakLine, disabled: !!busy || !voiceEnabled },
               busy ? t('speaking', '正在合成…') : readOnly ? t('textReader.read', '朗读文本') : t('speak', '朗读台词'),
+            ),
+            h(
+              Btn,
+              { kind: 'ghost', icon: 'stop', onClick: stopAudio, disabled: !playing },
+              t('textReader.stop', '停止朗读'),
             ),
             h('span', { className: 'vl-muted vl-kbd' }, 'Ctrl + Enter'),
             previewUrl
               ? h('audio', {
+                  ref: previewAudioRef,
                   controls: true,
                   preload: 'none',
-                  src: `${previewUrl}?t=${Date.now()}`,
+                  src: previewUrl,
                   className: 'vl-inline-audio',
+                  onPlay: () => setPlaying(true),
+                  onEnded: () => setPlaying(false),
                 })
               : null,
           ),
@@ -1324,6 +1369,7 @@ window.__ModuleLoader__.load({
                                 selected.name,
                                 h('span', { className: 'vl-chip', 'data-tone': selected.status === 'ready' ? 'ok' : 'warn' }, selected.status === 'ready' ? t('status.ready', '已保存') : t('status.training', '训练中')),
                                 selected.id === activeId ? h('span', { className: 'vl-chip', 'data-tone': 'brand' }, t('current', '当前使用')) : null,
+                                selected.id === activeId && !voiceEnabled ? h('span', { className: 'vl-chip', 'data-tone': 'warn' }, t('stoppedUsing', '已停止使用')) : null,
                                 selected.id === data.train?.targetPresetId ? h('span', { className: 'vl-chip', 'data-tone': 'brand' }, t('train.targetChip', '训练目标')) : null,
                                 selected.locked ? h('span', { className: 'vl-chip', 'data-tone': 'idle', title: selected.lockReason || '' }, t('locked', '只读')) : null,
                               ),
@@ -1350,7 +1396,19 @@ window.__ModuleLoader__.load({
                             h(
                               'div',
                               { className: 'vl-actions' },
-                              h(Btn, { icon: 'check', kind: selected.id === activeId ? 'ghost' : 'primary', onClick: activatePreset, disabled: !!busy || selected.id === activeId }, t('selectPreset', '选择预设')),
+                              h(Btn, { icon: 'check', kind: selected.id === activeId ? 'ghost' : 'primary', onClick: activatePreset, disabled: !!busy || (selected.id === activeId && voiceEnabled) }, t('selectPreset', '选择预设')),
+                              selected.kind === 'builtin' && selected.id === activeId
+                                ? h(
+                                    Btn,
+                                    {
+                                      icon: voiceEnabled ? 'pause' : 'play',
+                                      kind: 'ghost',
+                                      onClick: voiceEnabled ? stopUsingVoice : resumeUsingVoice,
+                                      disabled: !!busy,
+                                    },
+                                    voiceEnabled ? t('stopUsing', '停止使用') : t('resumeUsing', '恢复使用'),
+                                  )
+                                : null,
                               h(Btn, { icon: playing ? 'wave' : 'play', onClick: playing ? stopAudio : playAudio }, playing ? t('stop', '停止') : t('play', '播放音频')),
                               selected.kind !== 'builtin'
                                 ? h(
@@ -1652,6 +1710,7 @@ window.__ModuleLoader__.load({
                 refresh,
                 playUrl,
                 setToast,
+                onReaderEngineAuto: resetReaderEngine,
                 onOpenPreset: (id) => {
                   selectPreset(id)
                   changeTab('studio')
@@ -2076,10 +2135,12 @@ window.__ModuleLoader__.load({
     }
 
     // ── 多音频训练 ──────────────────────────────────────────────────────────
-    function TrainPanel({ ctx, data, busy, run, refresh, playUrl, setToast, onOpenPreset, t }) {
+    function TrainPanel({ ctx, data, busy, run, refresh, playUrl, setToast, onOpenPreset, onReaderEngineAuto, t }) {
       const train = data?.train || {}
       const models = train.models || []
-      const defaults = train.defaults || {}
+      const targetPresetId = train.targetPresetId || ''
+      const presetSettings = train.perPreset?.[targetPresetId] || {}
+      const defaults = { ...(train.defaults || {}), ...presetSettings }
       const [modelId, setModelId] = useState(defaults.model || 'voxcpm')
       const model = models.find((m) => m.id === modelId) || models[0] || { id: 'voxcpm', name: 'VoxCPM2 + LoRA', sampleRate: 16000, lora: true, available: false }
       const [draftId, setDraftId] = useState('')
@@ -2093,6 +2154,10 @@ window.__ModuleLoader__.load({
       const [exportDir, setExportDir] = useState(defaults.exportDir || '')
       const [exportResult, setExportResult] = useState(null)
       const [exporting, setExporting] = useState(false)
+      const [weightsOpen, setWeightsOpen] = useState(false)
+      const [weightsPath, setWeightsPath] = useState('')
+      const [weightsMode, setWeightsMode] = useState('train')
+      const [logsOpen, setLogsOpen] = useState(true)
       const [busyLocal, setBusyLocal] = useState('')
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
@@ -2108,10 +2173,31 @@ window.__ModuleLoader__.load({
       const itemsRef = useRef([])
       const draftIdRef = useRef('')
       const draftRef = useRef({ id: '', items: [] })
+      const targetIdRef = useRef(targetPresetId)
+
+      useEffect(() => {
+        targetIdRef.current = targetPresetId
+        const next = { ...(train.defaults || {}), ...(train.perPreset?.[targetPresetId] || {}) }
+        setModelId(next.model || 'voxcpm')
+        setSteps(next.steps || 1000)
+        setLoraR(next.loraR || 32)
+        setCheckpointSteps(next.checkpointSteps || 100)
+        setCheckpointSec(next.checkpointSec || 300)
+        setPathMode(next.pathMode || 'original')
+        setExportDir(next.exportDir || '')
+      }, [targetPresetId])
+
+      const savePresetSettings = (patch) => {
+        const id = targetIdRef.current
+        if (!id) return
+        post('train.presetSettings', { presetId: id, settings: patch }).catch(() => {})
+      }
 
       const session = train.session || null
       const sessions = train.sessions || []
       const targetPreset = train.targetPreset || null
+      const currentPresetId = data?.settings?.ui?.selectedPresetId || data?.activePresetId || ''
+      const currentPreset = (data?.presets || []).find((p) => p.id === currentPresetId) || null
       const activeStatus = session?.status || ''
       const isRunning = ['starting', 'training', 'pausing', 'stopping'].includes(activeStatus)
       const canResume = ['paused', 'interrupted', 'failed'].includes(activeStatus)
@@ -2419,11 +2505,93 @@ window.__ModuleLoader__.load({
           })
           setExportResult(res)
           setToast?.(`训练包已导出：${res.count} 条样本`)
-          post('settings.update', { settings: { train: { exportDir: exportDir || '', pathMode } } }).catch(() => {})
+          savePresetSettings({ exportDir: exportDir || '', pathMode })
         } catch (e) {
           setError(String(e?.message || e))
         } finally {
           setExporting(false)
+        }
+      }
+      const useWeightsTraining = () => {
+        setError('')
+        setNotice('')
+        setWeightsMode('train')
+        setWeightsOpen(true)
+      }
+      const useWeightsDirect = () => {
+        setError('')
+        setNotice('')
+        setWeightsMode('use')
+        setWeightsOpen(true)
+      }
+      const submitWeightsTraining = async (event) => {
+        event?.preventDefault?.()
+        const input = weightsPath.trim()
+        if (!input) {
+          setError('请填写训练权重目录，或 lora_weights.safetensors 文件路径')
+          return
+        }
+        setError('')
+        setNotice('')
+        if (weightsMode === 'use') {
+          if (!currentPresetId) {
+            setError('先在 Studio 选中一条要载入权重的声线')
+            return
+          }
+          setBusyLocal('载入权重…')
+          try {
+            const res = await post('preset.loadWeights', { presetId: currentPresetId, path: input })
+            setWeightsOpen(false)
+            setWeightsPath('')
+            setNotice(
+              `权重已载入当前声线：${currentPreset?.name || currentPresetId}${res.loaded?.r ? `（r=${res.loaded.r}）` : ''}，可以直接使用。`,
+            )
+            setToast?.('权重已载入当前声线')
+            await refresh(true)
+            onReaderEngineAuto?.(currentPresetId)
+            onOpenPreset?.(currentPresetId)
+          } catch (e) {
+            setError(String(e?.message || e))
+          } finally {
+            setBusyLocal('')
+          }
+          return
+        }
+        setBusyLocal('导入训练权重…')
+        try {
+          const res = await post('train.importWeights', { draftId: draftIdRef.current, path: input })
+          itemsRef.current = []
+          setItems([])
+          setSelectedIds([])
+          setJsonlLines([])
+          stopPreview()
+          if (res.loraR) setLoraR(Number(res.loraR))
+          setWeightsOpen(false)
+          setWeightsPath('')
+          setNotice(
+            `已导入训练权重：${res.initWeights?.name || input}${res.loraR ? `（r=${res.loraR}）` : ''}；当前音频和台词已清空，请重新上传新素材并填写台词。`,
+          )
+          setToast?.('已导入权重，并清空当前音频/台词')
+          await refresh(true)
+        } catch (e) {
+          setError(String(e?.message || e))
+        } finally {
+          setBusyLocal('')
+        }
+      }
+      const clearImportedWeights = async () => {
+        if (!window.confirm('清除已导入的训练权重？之后会从当前底座重新训练。')) return
+        setError('')
+        setNotice('')
+        setBusyLocal('清除权重…')
+        try {
+          await post('train.weights.clear', { draftId: draftIdRef.current })
+          setNotice('已清除导入的训练权重')
+          await refresh(true)
+        } catch (e) {
+          setError(String(e?.message || e))
+        } finally {
+          setBusyLocal('')
         }
       }
       const startTraining = async () => {
@@ -2458,7 +2626,7 @@ window.__ModuleLoader__.load({
           })
           if (res.warning) setNotice(res.warning)
           setToast?.(res.warning || '训练已启动')
-          post('settings.update', { settings: { train: { pathMode } } }).catch(() => {})
+          savePresetSettings({ pathMode })
           await refresh(true)
         } catch (e) {
           setError(String(e?.message || e))
@@ -2558,9 +2726,60 @@ window.__ModuleLoader__.load({
           setBusyLocal('')
         }
       }
+      const loadCheckpointToPreset = async (checkpoint) => {
+        if (!currentPresetId) {
+          setError('先在 Studio 选中一条要载入权重的声线')
+          return
+        }
+        if (!window.confirm(`把 step ${checkpoint.step || 0} 的权重载入当前声线「${currentPreset?.name || currentPresetId}」？`)) return
+        setBusyLocal('载入权重…')
+        setError('')
+        try {
+          const res = await post('preset.loadWeights', {
+            presetId: currentPresetId,
+            path: checkpoint.dir || checkpoint.weights,
+          })
+          setToast?.(`权重已载入：${currentPreset?.name || currentPresetId}${res.loaded?.r ? `（r=${res.loaded.r}）` : ''}`)
+          onReaderEngineAuto?.(currentPresetId)
+          onOpenPreset?.(currentPresetId)
+          await refresh(true)
+        } catch (e) {
+          setError(String(e?.message || e))
+        } finally {
+          setBusyLocal('')
+        }
+      }
       const downloadLog = () => {
         if (!session?.id) return
         window.open(`${API}/train/log?sessionId=${encodeURIComponent(session.id)}&download=1`, '_blank')
+      }
+      const openLog = async () => {
+        if (!session?.id) return
+        setError('')
+        setBusyLocal('打开日志…')
+        try {
+          await post('train.log.open', { sessionId: session.id })
+        } catch (e) {
+          setError(String(e?.message || e))
+        } finally {
+          setBusyLocal('')
+        }
+      }
+      const deleteLog = async () => {
+        if (!session?.id) return
+        if (!window.confirm('删除这次训练会话的日志文件？权重和检查点不会被删除。')) return
+        setError('')
+        setNotice('')
+        setBusyLocal('删除日志…')
+        try {
+          await post('train.log.delete', { sessionId: session.id })
+          setNotice('训练日志已删除')
+          await refresh(true)
+        } catch (e) {
+          setError(String(e?.message || e))
+        } finally {
+          setBusyLocal('')
+        }
       }
       const unbindTarget = async () => {
         if (!window.confirm('解除训练目标锁定？解除后该声线恢复可编辑/删除，后续检查点不再自动导入。')) return
@@ -2628,7 +2847,7 @@ window.__ModuleLoader__.load({
               { label: t('train.model', '语音模型'), hint: t('train.model.hint', '选择训练模型；采样率自动识别') },
               h(
                 'select',
-                { className: 'vl-input', value: model.id, onChange: (e) => setModelId(e.target.value) },
+                { className: 'vl-input', value: model.id, onChange: (e) => { setModelId(e.target.value); savePresetSettings({ model: e.target.value }) } },
                 models.map((m) => h('option', { key: m.id, value: m.id }, `${m.name}${m.available ? '' : '（不可用）'}`)),
               ),
             ),
@@ -2645,24 +2864,24 @@ window.__ModuleLoader__.load({
             h(
               Field,
               { label: t('train.steps', '训练步数') },
-              h(TextInput, { type: 'number', min: 10, max: 100000, value: steps, onChange: (e) => setSteps(Number(e.target.value)) }),
+              h(TextInput, { type: 'number', min: 10, max: 100000, value: steps, onChange: (e) => { const v = Number(e.target.value); setSteps(v); savePresetSettings({ steps: v }) } }),
             ),
             model.lora
               ? h(
                   Field,
                   { label: t('train.loraR', 'lora.r：') },
-                  h(TextInput, { type: 'number', min: 4, max: 128, value: loraR, onChange: (e) => setLoraR(Number(e.target.value)) }),
+                  h(TextInput, { type: 'number', min: 4, max: 128, value: loraR, onChange: (e) => { const v = Number(e.target.value); setLoraR(v); savePresetSettings({ loraR: v }) } }),
                 )
               : null,
             h(
               Field,
               { label: t('train.checkpointSteps', '每 N 步保存') },
-              h(TextInput, { type: 'number', min: 10, max: 100000, value: checkpointSteps, onChange: (e) => setCheckpointSteps(Number(e.target.value)) }),
+              h(TextInput, { type: 'number', min: 10, max: 100000, value: checkpointSteps, onChange: (e) => { const v = Number(e.target.value); setCheckpointSteps(v); savePresetSettings({ checkpointSteps: v }) } }),
             ),
             h(
               Field,
               { label: t('train.checkpointSec', '每 N 秒提取') },
-              h(TextInput, { type: 'number', min: 30, max: 3600, value: checkpointSec, onChange: (e) => setCheckpointSec(Number(e.target.value)) }),
+              h(TextInput, { type: 'number', min: 30, max: 3600, value: checkpointSec, onChange: (e) => { const v = Number(e.target.value); setCheckpointSec(v); savePresetSettings({ checkpointSec: v }) } }),
             ),
             h(
               Field,
@@ -2672,7 +2891,7 @@ window.__ModuleLoader__.load({
               },
               h(
                 'select',
-                { className: 'vl-input', value: pathMode, onChange: (e) => setPathMode(e.target.value) },
+                { className: 'vl-input', value: pathMode, onChange: (e) => { setPathMode(e.target.value); savePresetSettings({ pathMode: e.target.value }) } },
                 h('option', { value: 'original' }, t('train.pathMode.original', '原始上传文件（按上传地址）')),
                 h('option', { value: 'normalized' }, t('train.pathMode.normalized', '规范化 16k WAV（最稳）')),
               ),
@@ -2861,7 +3080,8 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'vl-toolbar vl-train-actions' },
-            h(Btn, { kind: 'primary', icon: 'play', onClick: startTraining, disabled: !!busyLocal || isRunning || !items.length || !model.available }, busyLocal === '启动训练…' ? t('train.starting', '启动中…') : t('train.start', '开始训练')),
+            h(Btn, { kind: 'primary', icon: 'play', onClick: startTraining, disabled: !!busyLocal || isRunning || !model.available, title: !items.length ? '先上传音频并填写台词' : '' }, busyLocal === '启动训练…' ? t('train.starting', '启动中…') : t('train.start', '开始训练')),
+            !items.length ? h('span', { className: 'vl-muted' }, '先上传音频和台词，开始训练才会启用') : null,
             h(Btn, { icon: 'refresh', onClick: previewJsonl, disabled: !!busyLocal || !items.length }, t('train.jsonl', '预览 JSONL')),
             h(Btn, { kind: 'ghost', icon: 'trash', onClick: () => { setJsonlLines(null); setError('') }, disabled: !!busyLocal }, t('train.clearPreview', '清空预览')),
             h('audio', { ref: audioRef, preload: 'none', style: { display: 'none' } }),
@@ -2886,7 +3106,7 @@ window.__ModuleLoader__.load({
                 { label: t('train.exportDir', '导出到（父目录）'), hint: t('train.exportDir.hint', '留空使用 train/exports；会在其中创建带时间戳的包') },
                 h(TextInput, {
                   value: exportDir,
-                  onChange: (e) => setExportDir(e.target.value),
+                  onChange: (e) => { setExportDir(e.target.value); savePresetSettings({ exportDir: e.target.value }) },
                   placeholder: 'D:\\voice-data\\export',
                 }),
               ),
@@ -2899,8 +3119,79 @@ window.__ModuleLoader__.load({
                 { icon: 'download', onClick: exportTraining, disabled: exporting || !items.length },
                 exporting ? t('train.exporting', '导出中…') : t('train.exportNow', '导出训练包'),
               ),
+              h(
+                Btn,
+                { icon: 'upload', onClick: useWeightsTraining, disabled: !!busyLocal || isRunning },
+                t('train.useWeights', '使用权重训练'),
+              ),
+              h(
+                Btn,
+                { icon: 'upload', onClick: useWeightsDirect, disabled: !!busyLocal || isRunning },
+                t('train.useWeightsDirect', '使用权重'),
+              ),
+              h(
+                Btn,
+                {
+                  kind: 'primary',
+                  icon: 'play',
+                  onClick: startTraining,
+                  disabled: !!busyLocal || isRunning || !model.available,
+                  title: !items.length ? '先上传音频并填写台词' : '',
+                },
+                t('train.start', '开始训练'),
+              ),
               h('span', { className: 'vl-muted' }, t('train.exportHint', '与实测可用包同结构：audio/N.wav + train.jsonl + README_AutoDL.txt')),
             ),
+            train.draft?.initWeights
+              ? h(
+                  'div',
+                  { className: 'vl-train-init' },
+                  h(Icon, { name: 'lock', size: 13 }),
+                  h(
+                    'span',
+                    null,
+                    `已导入训练权重：${train.draft.initWeights.name}${train.draft.initWeights.r ? `（r=${train.draft.initWeights.r}）` : ''}；上传新素材后开始训练`,
+                  ),
+                  h(Btn, { size: 'sm', kind: 'ghost', onClick: clearImportedWeights, disabled: !!busyLocal || isRunning }, '清除导入权重'),
+                )
+              : null,
+            weightsOpen
+              ? h(
+                  'form',
+                  { className: 'vl-train-weights-form', onSubmit: submitWeightsTraining },
+                  h(
+                    'div',
+                    { className: 'vl-weights-warn' },
+                    weightsMode === 'use'
+                      ? `会把权重直接载入当前声线「${currentPreset?.name || '未选择'}」，不会清空训练音频或台词。填目录会同时读取 lora_weights.safetensors 和 lora_config.json；直接填 .safetensors 时，同目录有 json 会一起读取。ZIP 请先解压。`
+                      : '导入成功后会清空当前写入端口里的全部音频和台词 JSONL，再使用这份权重训练。填目录会同时读取 lora_weights.safetensors 和 lora_config.json；直接填 .safetensors 时，同目录有 json 会一起读取。ZIP 请先解压。',
+                  ),
+                  h('div', { className: 'vl-weights-label' }, '权重目录 / 文件路径'),
+                  h(TextInput, {
+                    value: weightsPath,
+                    onChange: (e) => setWeightsPath(e.target.value),
+                    placeholder: 'D:\\voice-data\\weights',
+                    autoFocus: true,
+                  }),
+                  h(
+                    'div',
+                    { className: 'vl-toolbar' },
+                    h(Btn, { type: 'submit', icon: 'upload', disabled: !!busyLocal || isRunning }, busyLocal || (weightsMode === 'use' ? '载入并直接使用' : '导入并清空')),
+                    h(
+                      Btn,
+                      {
+                        type: 'button',
+                        kind: 'ghost',
+                        onClick: () => {
+                          setWeightsOpen(false)
+                          setWeightsPath('')
+                        },
+                      },
+                      '取消',
+                    ),
+                  ),
+                )
+              : null,
             exportResult
               ? h(
                   'div',
@@ -2948,9 +3239,20 @@ window.__ModuleLoader__.load({
                 isRunning ? h(Btn, { kind: 'ghost', icon: 'close', onClick: stopTraining, disabled: !!busyLocal }, t('train.stop', '停止')) : null,
                 h(Btn, { icon: 'refresh', onClick: () => refresh(true), disabled: !!busyLocal }, t('refresh', '刷新')),
                 h(Btn, { icon: 'download', onClick: downloadLog, disabled: !session.logAvailable }, t('train.downloadLog', '下载日志')),
+                h(Btn, { icon: 'trash', onClick: deleteLog, disabled: !session.logAvailable || !!busyLocal }, t('train.deleteLog', '删除日志')),
+                h(Btn, { icon: 'open', onClick: openLog, disabled: !session.logAvailable || !!busyLocal }, t('train.openLog', '打开日志')),
+                h(
+                  Btn,
+                  { kind: 'ghost', icon: logsOpen ? 'close' : 'play', onClick: () => setLogsOpen((value) => !value) },
+                  logsOpen ? t('train.closeLog', '关闭日志') : t('train.viewLog', '查看日志'),
+                ),
               ),
-              h('pre', { ref: logRef, className: 'vl-train-log' }, (session.logs || []).join('\n') || t('train.noLog', '还没有日志…')),
-              h('p', { className: 'vl-help' }, t('train.log.hint', '训练日志默认保存 7 天，之后自动清理；需要长期保留请先下载。')),
+              logsOpen
+                ? h(React.Fragment, null,
+                    h('pre', { ref: logRef, className: 'vl-train-log' }, (session.logs || []).join('\n') || t('train.noLog', '还没有日志…')),
+                    h('p', { className: 'vl-help' }, t('train.log.hint', '训练日志默认保存 7 天，之后自动清理；需要长期保留请先下载。')),
+                  )
+                : null,
             )
           : null,
         session
@@ -2980,6 +3282,7 @@ window.__ModuleLoader__.load({
                         h('span', { className: 'vl-chip', 'data-tone': checkpoint.kind === 'step' ? 'brand' : 'ok' }, checkpoint.kind === 'step' ? `step ${checkpoint.step}` : `提取 ${checkpoint.step}`),
                         h('span', { className: 'vl-train-version-meta' }, `${new Date(checkpoint.createdAt).toLocaleString()} · ${(Number(checkpoint.size || 0) / 1048576).toFixed(1)} MB`),
                         h(Btn, { size: 'sm', icon: 'plus', onClick: () => createVoiceFromCheckpoint(checkpoint), disabled: !!busyLocal }, t('train.addToLibrary', '加入声线库')),
+                        h(Btn, { size: 'sm', icon: 'upload', onClick: () => loadCheckpointToPreset(checkpoint), disabled: !!busyLocal }, t('train.loadWeights', '载入权重')),
                         h(Btn, { size: 'sm', icon: 'play', onClick: () => previewCheckpoint(checkpoint), disabled: !!busyLocal }, t('train.preview', '试听')),
                         h(Btn, { size: 'sm', kind: 'ghost', icon: 'trash', onClick: () => deleteCheckpoint(checkpoint), disabled: !!busyLocal }, t('delete', '删除')),
                       ),
@@ -3508,6 +3811,10 @@ window.__ModuleLoader__.load({
       .vl-train-jsonl pre{margin:6px 0 0;max-height:220px;overflow:auto;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2);font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
       .vl-train-export{margin-top:14px;padding-top:12px;border-top:1px dashed var(--dsw-alias-border-l1)}
       .vl-train-export-result{margin-top:10px;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2);font-size:11px;line-height:1.6;word-break:break-all}
+      .vl-train-init{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 5%,var(--dsw-alias-bg-layer-2));font-size:11px;line-height:1.5}
+      .vl-train-weights-form{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
+      .vl-weights-warn{font-size:11px;line-height:1.6;color:var(--dsw-alias-text-warn,var(--dsw-alias-text-l2))}
+      .vl-weights-label{font-size:11px;font-weight:600;color:var(--dsw-alias-text-l1)}
       .vl-train-metrics{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 0 2px}
       .vl-train-metric{display:flex;align-items:baseline;gap:5px;font-size:11px}
       .vl-train-metric strong{font:600 11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--dsw-alias-brand-primary)}
